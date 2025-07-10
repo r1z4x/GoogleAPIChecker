@@ -11,6 +11,7 @@ import (
 
 var (
 	apiToken  string
+	projectID string
 	threads   int
 	output    string
 	export    string
@@ -27,6 +28,7 @@ using multithreading and calculates potential costs based on pricing tables.`,
 	}
 
 	rootCmd.Flags().StringVarP(&apiToken, "token", "t", "", "Google API token (required)")
+	rootCmd.Flags().StringVarP(&projectID, "project", "p", "", "Google Cloud Project ID (required for real API calls)")
 	rootCmd.Flags().IntVarP(&threads, "threads", "n", 10, "Number of concurrent threads")
 	rootCmd.Flags().StringVarP(&output, "output", "o", "results.json", "Output file path")
 	rootCmd.Flags().StringVarP(&export, "export", "e", "", "Export format: csv, pdf, both")
@@ -49,7 +51,7 @@ func runChecker(cmd *cobra.Command, args []string) {
 	}
 	fmt.Println()
 
-	checker := NewGoogleAPIChecker(apiToken, threads)
+	checker := NewGoogleAPIChecker(apiToken, projectID, threads)
 	results, err := checker.CheckAllAPIs()
 	if err != nil {
 		log.Fatalf("Error checking APIs: %v", err)
@@ -68,6 +70,12 @@ func runChecker(cmd *cobra.Command, args []string) {
 	reportFile := strings.Replace(output, ".json", "_report.json", 1)
 	if err := SaveReport(report, reportFile); err != nil {
 		log.Fatalf("Error saving report: %v", err)
+	}
+
+	// Generate HTML report
+	htmlFile := strings.Replace(output, ".json", "_report.html", 1)
+	if err := generateHTMLReport(results, htmlFile); err != nil {
+		log.Printf("Warning: HTML report generation failed: %v", err)
 	}
 
 	// Export if requested

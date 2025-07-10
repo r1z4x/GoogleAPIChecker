@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,20 +33,29 @@ type CostInfo struct {
 
 // GoogleAPIChecker handles the checking of Google APIs
 type GoogleAPIChecker struct {
-	token   string
-	threads int
-	client  *http.Client
-	ctx     context.Context
+	token      string
+	projectID  string
+	threads    int
+	client     *http.Client
+	ctx        context.Context
+	useRealAPI bool
 }
 
 // NewGoogleAPIChecker creates a new instance of the checker
-func NewGoogleAPIChecker(token string, threads int) *GoogleAPIChecker {
-	return &GoogleAPIChecker{
-		token:   token,
-		threads: threads,
-		client:  &http.Client{Timeout: 30 * time.Second},
-		ctx:     context.Background(),
+func NewGoogleAPIChecker(token, projectID string, threads int) *GoogleAPIChecker {
+	// Always use real API if token is provided
+	useRealAPI := token != ""
+
+	checker := &GoogleAPIChecker{
+		token:      token,
+		projectID:  projectID,
+		threads:    threads,
+		client:     &http.Client{Timeout: 30 * time.Second},
+		ctx:        context.Background(),
+		useRealAPI: useRealAPI,
 	}
+
+	return checker
 }
 
 // CheckAllAPIs performs the main checking operation with multithreading
@@ -151,8 +161,81 @@ func (c *GoogleAPIChecker) checkSingleAPI(apiName string) APIResult {
 
 // getAvailableAPIs returns a list of all available Google APIs
 func (c *GoogleAPIChecker) getAvailableAPIs() ([]string, error) {
-	// This is a simplified list - in a real implementation, you would
-	// query the Google Cloud Service Usage API to get the actual list
+	// If we have real API access, try to get the actual list
+	if c.useRealAPI {
+		return c.getAvailableAPIsReal()
+	}
+
+	// Fallback to static list for testing
+	return c.getAvailableAPIsStatic()
+}
+
+// getAvailableAPIsReal gets the actual list of APIs from Google Cloud
+func (c *GoogleAPIChecker) getAvailableAPIsReal() ([]string, error) {
+	var url string
+
+	if c.projectID != "" {
+		// Use Service Usage API with project ID
+		url = fmt.Sprintf("https://serviceusage.googleapis.com/v1/projects/%s/services", c.projectID)
+	} else {
+		// Use Discovery API to get all available APIs
+		url = "https://www.googleapis.com/discovery/v1/apis"
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Add("X-Goog-Api-Key", c.token)
+	req.Header.Add("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get API list: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("failed to get API list, status: %d", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to parse API list response: %v", err)
+	}
+
+	var apis []string
+
+	if c.projectID != "" {
+		// Parse Service Usage API response
+		if services, ok := result["services"].([]interface{}); ok {
+			for _, service := range services {
+				if serviceMap, ok := service.(map[string]interface{}); ok {
+					if name, ok := serviceMap["name"].(string); ok {
+						apis = append(apis, name)
+					}
+				}
+			}
+		}
+	} else {
+		// Parse Discovery API response
+		if items, ok := result["items"].([]interface{}); ok {
+			for _, item := range items {
+				if itemMap, ok := item.(map[string]interface{}); ok {
+					if name, ok := itemMap["name"].(string); ok {
+						apis = append(apis, name+".googleapis.com")
+					}
+				}
+			}
+		}
+	}
+
+	return apis, nil
+}
+
+// getAvailableAPIsStatic returns a static list of common Google APIs
+func (c *GoogleAPIChecker) getAvailableAPIsStatic() ([]string, error) {
 	apis := []string{
 		"compute.googleapis.com",
 		"storage.googleapis.com",
@@ -206,7 +289,6 @@ func (c *GoogleAPIChecker) getAvailableAPIs() ([]string, error) {
 		"retail.googleapis.com",
 		"documentai.googleapis.com",
 		"videointelligence.googleapis.com",
-		"videointelligence.googleapis.com",
 		"gameservices.googleapis.com",
 		"playablelocations.googleapis.com",
 		"places.googleapis.com",
@@ -232,30 +314,87 @@ func (c *GoogleAPIChecker) getAvailableAPIs() ([]string, error) {
 		"securetoken.googleapis.com",
 		"appengine.googleapis.com",
 		"cloudapis.googleapis.com",
-		"cloudtrace.googleapis.com",
-		"clouddebugger.googleapis.com",
-		"cloudprofiler.googleapis.com",
-		"cloudmonitoring.googleapis.com",
-		"cloudlogging.googleapis.com",
-		"cloudbuild.googleapis.com",
-		"cloudtasks.googleapis.com",
-		"cloudscheduler.googleapis.com",
-		"cloudkms.googleapis.com",
-		"cloudiot.googleapis.com",
-		"cloudtrace.googleapis.com",
-		"clouddebugger.googleapis.com",
-		"cloudprofiler.googleapis.com",
-		"cloudmonitoring.googleapis.com",
-		"cloudlogging.googleapis.com",
 	}
 
 	return apis, nil
 }
 
-// isAPIEnabled checks if a specific API is enabled
+// isAPIEnabled checks if a specific API is enabled using Google Cloud Service Usage API
 func (c *GoogleAPIChecker) isAPIEnabled(apiName string) (bool, error) {
-	// In a real implementation, you would use the Google Cloud Service Usage API
-	// For now, we'll simulate the check
+	// If we have a real API token, use real API calls
+	if c.useRealAPI {
+		return c.checkAPIEnabledReal(apiName)
+	}
+
+	// Fallback to simulation for testing
+	return c.checkAPIEnabledSimulated(apiName)
+}
+
+// checkAPIEnabledReal checks API status using real Google Cloud Service Usage API
+func (c *GoogleAPIChecker) checkAPIEnabledReal(apiName string) (bool, error) {
+	var url string
+
+	if c.projectID != "" {
+		// Use Service Usage API with project ID
+		url = fmt.Sprintf("https://serviceusage.googleapis.com/v1/projects/%s/services/%s", c.projectID, apiName)
+	} else {
+		// Use Discovery API to check if API exists
+		url = fmt.Sprintf("https://www.googleapis.com/discovery/v1/apis/%s/v1", strings.TrimSuffix(apiName, ".googleapis.com"))
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// Add API key to request (Google Cloud API uses API key, not Bearer token)
+	req.Header.Add("X-Goog-Api-Key", c.token)
+	req.Header.Add("Content-Type", "application/json")
+
+	// Make the actual HTTP request
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("failed to make API request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if c.projectID != "" {
+		// Check if API is enabled based on response
+		if resp.StatusCode == 200 {
+			// Parse response body to check if service is enabled
+			var result map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				return false, fmt.Errorf("failed to parse response: %v", err)
+			}
+
+			// Check if the service is enabled
+			if state, ok := result["state"].(string); ok {
+				return state == "ENABLED", nil
+			}
+			return true, nil // Default to enabled if state not found
+		} else if resp.StatusCode == 404 {
+			// Service not found, consider it disabled
+			return false, nil
+		} else {
+			// Other error status codes
+			return false, fmt.Errorf("API request failed with status: %d", resp.StatusCode)
+		}
+	} else {
+		// Without project ID, check if API is available (not necessarily enabled)
+		if resp.StatusCode == 200 {
+			// API exists and is available, but we can't determine if it's enabled without project ID
+			// For now, we'll consider it as "available" but not necessarily "enabled"
+			return false, nil // Consider as disabled since we can't verify actual enable status
+		} else if resp.StatusCode == 404 {
+			return false, nil // API not found
+		} else {
+			return false, fmt.Errorf("API request failed with status: %d", resp.StatusCode)
+		}
+	}
+}
+
+// checkAPIEnabledSimulated provides simulated API status for testing
+func (c *GoogleAPIChecker) checkAPIEnabledSimulated(apiName string) (bool, error) {
 	time.Sleep(100 * time.Millisecond) // Simulate API call
 
 	// Simulate some APIs being enabled and others disabled
